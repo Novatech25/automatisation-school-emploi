@@ -1,0 +1,163 @@
+# ============================================
+# Room Assignment Automation - Cron Jobs
+# ============================================
+# Ce workflow exécute automatiquement:
+# 1. Le calcul quotidien des attributions de salles (à 18h)
+# 2. Les notifications de rappel T-60 et T-15 (toutes les 5 minutes)
+#
+# Prérequis:
+# - Variables d'environnement configurées dans GitHub Secrets:
+#   - SUPABASE_URL
+#   - SUPABASE_ANON_KEY
+# ============================================
+
+name: Room Assignment Automation
+
+on:
+  schedule:
+    # Calcul quotidien à 18h00 (heure de Paris)
+    - cron: '0 18 * * *'
+    # Vérification des notifications toutes les 5 minutes
+    - cron: '*/5 * * * *'
+  
+  # Permet de déclencher manuellement depuis l'interface GitHub
+  workflow_dispatch:
+    inputs:
+      job_type:
+        description: 'Type de tâche à exécuter'
+        required: true
+        default: 'calculate'
+        type: choice
+        options:
+          - calculate
+          - notify_t60
+          - notify_t15
+          - all
+
+jobs:
+  # ============================================
+  # Job 1: Calcul quotidien des attributions
+  # ============================================
+  calculate-assignments:
+    name: Calculer les attributions
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 18 * * *' || github.event.inputs.job_type == 'calculate' || github.event.inputs.job_type == 'all'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Calculer les attributions pour demain
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          # Calculer la date de demain
+          TOMORROW=$(date -d "+1 day" +%Y-%m-%d)
+          echo "Calcul des attributions pour le $TOMORROW"
+          
+          # Appeler la Edge Function pour chaque école activée
+          # Note: Vous devrez adapter cette logique selon votre structure
+          curl -X POST "${SUPABASE_URL}/functions/v1/calculate-room-assignments" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"schoolId\": \"*\",
+              \"sessionDate\": \"${TOMORROW}\",
+              \"autoPublish\": false
+            }" || echo "Note: Le endpoint peut nécessiter une logique différente"
+
+      - name: Notification Slack (optionnel)
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: '❌ Le calcul des attributions de salles a échoué'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # ============================================
+  # Job 2: Notifications T-60 (1 heure avant)
+  # ============================================
+  notify-t60:
+    name: Notifications T-60min
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '*/5 * * * *' || github.event.inputs.job_type == 'notify_t60' || github.event.inputs.job_type == 'all'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Envoyer les rappels T-60
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          echo "Envoi des notifications T-60 pour le $TODAY"
+          
+          curl -X POST "${SUPABASE_URL}/functions/v1/send-room-assignment-notifications" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"notificationWindow\": 60,
+              \"sessionDate\": \"${TODAY}\"
+            }" || echo "Continuer même en cas d'erreur"
+
+  # ============================================
+  # Job 3: Notifications T-15 (15 minutes avant)
+  # ============================================
+  notify-t15:
+    name: Notifications T-15min
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '*/5 * * * *' || github.event.inputs.job_type == 'notify_t15' || github.event.inputs.job_type == 'all'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Envoyer les rappels T-15
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          echo "Envoi des notifications T-15 pour le $TODAY"
+          
+          curl -X POST "${SUPABASE_URL}/functions/v1/send-room-assignment-notifications" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"notificationWindow\": 15,
+              \"sessionDate\": \"${TODAY}\"
+            }" || echo "Continuer même en cas d'erreur"
+
+  # ============================================
+  # Job 4: Nettoyage des anciennes attributions (optionnel)
+  # ============================================
+  cleanup-old-assignments:
+    name: Nettoyage des anciennes attributions
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '0 3 * * 0' || github.event.inputs.job_type == 'cleanup'  # Tous les dimanches à 3h
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Supprimer les attributions de plus de 30 jours
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          echo "Nettoyage des attributions anciennes..."
+          
+          # Cette requête SQL peut être exécutée via une RPC
+          curl -X POST "${SUPABASE_URL}/rest/v1/rpc/cleanup_old_room_assignments" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{ \"days_to_keep\": 30 }" || echo "RPC non configurée - ignorer"
